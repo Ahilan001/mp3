@@ -1,5 +1,6 @@
 const User = require('../models/user')
 const {ok, created, badRequest, notFound, serverError} = require('./helpers')
+const {parseListQuery, parseSelect, handleQueryError} = require('./query')
 
 const isValidId = (id) => /^[0-9a-fA-F]{24}$/.test(id)
 
@@ -33,10 +34,26 @@ module.exports = function (router){
     router.route('/users')
         .get(async (req, res) => {
             try {
-                const users = await User.find()
-                return ok(res, users)
+                const q = parseListQuery(req.query, 100)
+                if (q.count){
+                    return ok(res, await User.countDocuments(q.where))
+                }
+                let query = User.find(q.where)
+                if (q.sort){
+                    query = query.sort(q.sort)
+                }
+                if (q.select){
+                    query = query.select(q.select)
+                }
+                if (q.skip){
+                    query = query.skip(q.skip)
+                }
+                if (q.limit !== undefined){
+                    query = query.limit(q.limit)
+                }
+                return ok(res, await query)
             } catch (e) {
-                return serverError(res)
+                return handleQueryError(res, e)
             }
         })
         .post(async (req, res) => {
@@ -61,13 +78,14 @@ module.exports = function (router){
                 if (!isValidId(req.params.id)){
                     return notFound(res, 'User Not Found')
                 }
-                const user = await User.findById(req.params.id)
+                const select = parseSelect(req.query.select)
+                const user = await User.findById(req.params.id).select(select || {})
                 if (!user){
                     return notFound(res, 'User Not Found')
                 }
                 return ok(res, user)
             } catch (e){
-                return serverError(res)
+                return handleQueryError(res, e)
             }
         })
         .put(async (req, res) => {
