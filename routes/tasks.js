@@ -1,10 +1,11 @@
 const Task = require('../models/task')
+const User = require('../models/user')
 const {ok, created, badRequest, notFound, serverError} = require('./helpers')
 const {parseListQuery, parseSelect, handleQueryError} = require('./query')
 
 const isValidId = (id) => /^[0-9a-fA-F]{24}$/.test(id)
 
-const DELETE_STATUS = 204
+//const DELETE_STATUS = 204
 
 function parseTaskBody(body) {
     body = body || {}
@@ -66,7 +67,7 @@ function parseTaskBody(body) {
     }
 
     if (body.assignedUserName === undefined){
-        out.assignedUserName = 'unassigned'
+        out.assignedUserName = undefined
     }
     else if (typeof body.assignedUserName === 'string'){
         out.assignedUserName = body.assignedUserName
@@ -75,6 +76,36 @@ function parseTaskBody(body) {
         return {error: 'Please provide a valid Assigned User Name'}
     }
     return {value: out}
+}
+
+async function resolveAssignment(value){
+    if (value.assignedUser === ''){
+        value.assignedUserName = 'unassigned'
+        return {}
+    }
+    if (!isValidId(value.assignedUser)){
+        return {status: 400, error: 'Assigned user does not have valid ID.'}
+    }
+    const user = await User.findById(value.assignedUser)
+    if (!user){
+        return {status: 404, error: 'Assigned user not found.'}
+    }
+    if (value.assignedUserName !== undefined && value.assignedUserName !== user.name){
+        return {status: 400, error: 'Username does not match the assigned user.'}
+    }
+    value.assignedUserName = user.name
+    return {}
+}
+
+async function syncUsers(task, oldUserId){
+    const taskId = String(task._id)
+    if (oldUserId && oldUserId !== task.assignedUser){
+        await User.updateOne({_id: oldUserId}, {$pull: {pendingTasks: taskId}})
+    }
+    if (task.assignedUser){
+        const op = task.completed ? {$pull: {pendingTasks: taskId}} : {$addToSet: {pendingTasks: taskId}}
+        await User.updateOne({_id: task.assignedUser}, op)
+    }
 }
 
 module.exports = function (router) {
@@ -109,7 +140,15 @@ module.exports = function (router) {
                 if (error) {
                     return badRequest(res, error)
                 }
+                const a = await resolveAssignment(value)
+                if (a.status === 400){
+                    return badRequest(res, a.error)
+                }
+                if (a.status === 404){
+                    return notFound(res, a.error)
+                }
                 const task = await Task.create(value)
+                await syncUsers(task, null)
                 return created(res, task, 'Task Created')
             } catch (e) {
                 return serverError(res)
@@ -144,8 +183,17 @@ module.exports = function (router) {
                 if (error){
                     return badRequest(res, error)
                 }
+                const a = await resolveAssignment(value)
+                if (a.status === 400){
+                    return badRequest(res, a.error)
+                }
+                if (a.status === 404){
+                    return notFound(res, a.error)
+                }
+                const oldUserId = task.assignedUser
                 task.set(value)
                 await task.save()
+                await syncUsers(task, oldUserId)
                 return ok(res, task, 'Task Updated')
             } catch (e){
                 return serverError(res)
@@ -160,10 +208,13 @@ module.exports = function (router) {
                 if (!task){
                     return notFound(res, 'Task Not Found')
                 }
-                if (DELETE_STATUS === 204){
-                    return res.status(204).end()
+                if (task.assignedUser){
+                    await User.updateOne({_id: task.assignedUser}, {$pull: {pendingTasks: String(task._id)}})
                 }
-                return ok(res, task, 'Task Deleted')
+
+                return res.status(204).end()
+
+                //return ok(res, task, 'Task Deleted')
             } catch (e){
                 return serverError(res)
             }
